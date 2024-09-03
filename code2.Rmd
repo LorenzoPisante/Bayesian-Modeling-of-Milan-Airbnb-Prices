@@ -1,0 +1,699 @@
+---
+title: "Comparison of bayesian models of Milan Airbnb prices "
+author: "Lorenzo Pisante"
+date: "Bayesian Statistics project 2022/23"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+urlcolor: blue
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE, message=FALSE)
+```
+
+```{r}
+# load libraries
+library(here)
+library(dplyr)
+library(skimr)
+library(stringr)
+library(knitr)
+library(tidyverse)
+library(janitor)
+library(ggmap)
+library(rgeos)
+library(maptools)
+library(RColorBrewer)
+library(rstan)
+library(caret)
+library(loo)
+library(gridExtra)
+library(bayesplot) 
+library(tidybayes)
+library(tidyr)
+library(fastDummies)
+# clear memory 
+invisible(gc())
+invisible(memory.limit(9999999999))
+```
+
+# Introduction
+
+The city of Milan is the capital city of Lombardy and is the second most populous city in Italy, with a recorded population of 1,396,059 individuals according to the 2021 Census of Population (ISTAT, 2022). It is renowned as one of the world's major cultural and financial hubs, attracting individuals from all corners of the globe for its rich business landscape, and illustrious arts and culture. Sports enthusiasts can head to the San Siro Stadium to cheer for AC Milan or Inter Milan football clubs, while fashion and design aficionados can revel in the exuberance of the Milan Fashion Week and Salone del Mobile. Regardless of one's interests, there is something for everyone in the city. 
+
+With the escalating prices of hotel rooms, an increased number of visitors are opting for alternative forms of accommodations while on their journey. Combined with other factors like privacy and amenities like in-suite kitchens/laundry, Airbnbs have emerged as an appealing alternative to traditional hotels for numerous travelers. Airbnb’s business model is centered around a marketplace platform where hosts and guests exchange housing for money (Airbnb, 2022). When listing their property on Airbnb, hosts have the ability to set additional prices for individual nights, weekly stays, cleaning fees, weekend prices, and extra guests.
+
+The goal of this analysis is to scrutinize the various factors that influence the prices of Airbnbs in Milan. We will be examining a range of factors, from details on the listing itself, like the neighborhood the listing is located in, the type of room, the number of bathrooms, etc., to information about the host and the reviews a listing has received. Understanding these factors' role in the pricing of these specific listings is crucial as it offers deeper insights into the dynamics of the sharing economy in the city.
+
+
+
+# Data 
+
+Airbnb makes data available, updated annually, on the main tourist locations where it operates, in its portal open to everyone. Inside Airbnb is a project with the objective of providing data that quantifies the impact of short-term rentals on the residential market. There are many variables available in the dataset and for the purpose of this analysis, we have limited the dataframe to certain variables we intend to examine further. We have chosen to remove text variables such as the name of the house, the description, and the name of the owner. This data comes from their most recent version, compiled on December 05, 2022, and contains 21,261 observations.
+
+We have a diverse set of variables available to us for the analysis. The data contains information on the listing such as the neighborhood it is located in, the type of room, and its size (number of bathrooms and how many people it can accommodate). Lastly, we have information the host and its review scores, both overall and for different subcategories, and the number of reviews.
+
+During the data preprocessing, it was found that there was a total of 21,261 observations, but only 21,121 distinct observations (140 duplicate rows). It may be plausible that a host has multiple listings in a given location, however, it is less likely that all the other variables are the same. Therefore, these duplicates were removed from the data.
+
+Regarding missing values, the bathrooms variable was completely empty. To overcome this, we extracted the required information from the `bathrooms_text` column. The review score variables had a completion rate of approx. 77%, the bedrooms variable was 93% complete, and then bathrooms and host variables were both approximately 99% complete. Looking closer at the review variables, it was found that many of the reviews had a rating of 0, or only had one incomplete review. Regarding the bedrooms and bathrooms, it was not clear if imputation would be possible as there were many different room type and accommodates combinations. Looking at the host-related variables, there was such a small number that removing these observations would not drastically alter the composition of the data.
+
+Examining these missing values provided us with lots of information in order to examine where we may want to consider removing variables or observations due to lack of information. Given the size of our dataset, and the fact that these are variables that we expect may be influential on the price of an Airbnb, we proceeded to remove these missing values due to a lack of information. After removing missing values and duplicates, we are left with 15,731 observations.
+
+The main dependent variable of interest to us is the price of the listing. We will apply a log-transformation to obtain our dependent variable of interest, `log(price)` as price is heavily right-skewed as seen below .
+
+```{r}
+# read in data
+airbnb_raw <- read.csv(here("/Users/pilota/Desktop/lore/code/airbnbR.csv"),na.strings=c(""," ","NA"))
+
+#rendo zona categorica
+airbnb_raw$zona <- as.factor(airbnb_raw$zona)
+
+# restrict dataframe to certain variables
+airbnb_subset <- airbnb_raw %>% dplyr::select(
+  host_id,
+
+  host_listings_count,
+
+  neighbourhood,
+  room_type,
+
+  bathrooms_text,
+  accommodates,
+  bedrooms,
+  price,
+  number_of_reviews,
+
+  review_scores_rating,
+  review_scores_accuracy,
+  review_scores_cleanliness,
+  review_scores_checkin,
+  review_scores_communication,
+  review_scores_location,
+  review_scores_value,
+  zona
+)
+```
+
+```{r, results="hide"}
+# total number of obs
+airbnb_subset %>% count()
+
+# total number of distinct obs
+airbnb_subset %>% distinct() %>% count()
+
+# remove duplicates
+airbnb_subset <- airbnb_subset %>% distinct()
+
+airbnb_final <-airbnb_subset
+
+# add log price
+airbnb_final <- airbnb_final %>% mutate(log_price = log(price))
+
+```
+
+```{r}
+# PRICE
+
+price_dat <- airbnb_final %>%
+  select(price, log_price) %>%
+  pivot_longer(cols=price:log_price, names_to = "Type", values_to = "Price")
+
+price_plot <-	ggplot(price_dat, aes(x = Price, fill=Type, facet = Type, ..density..)) +
+  geom_histogram(bins = 100, fill = "black", alpha = 0.3) +
+  geom_density(fill="lightblue", alpha = 0.8) +
+  facet_wrap(~Type, scales = "free") +
+  theme_bw() +
+  labs(title = "Price and Log Price Density Plots") +
+  theme(axis.title.x=element_blank())
+
+price_plot
+```
+
+
+Given that we are interested in modeling the log price, we can take a look at the areas in Milan that present the highest average price. We notice that the most expensive districts are often the most central areas of Milan.
+
+```{r, result="hide"}
+##raggruppamento per quartieri
+  
+# Calcolare la media dei prezzi e il conteggio delle case per ogni quartiere
+result <- airbnb_final %>%
+  group_by(neighbourhood) %>%
+  summarise(average_price = mean(log_price, na.rm = TRUE), count = n()) %>%
+  arrange(desc(average_price))
+
+# Prendi i primi 10 quartieri con la media dei prezzi più alta
+top_10_neighbourhoods <- head(result, 10)
+```
+
+```{r, crop=TRUE}
+
+# Creare un grafico a barre
+ggplot(top_10_neighbourhoods, aes(x = reorder(neighbourhood, -average_price), y = average_price, fill = count)) +
+  geom_bar(stat = "identity") +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(x = "Neighbourhoods", y = "Average Log Price", fill = "Number of houses") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle("Top 10 neighbourhoods with the highest average price for homes")
+
+
+```
+
+Subsequently, each neighbourhoods  was assigned one of the conventional 9 zones of Milan, and we display the average price for each zone. Zone 1, the central area, remains the most expensive, and also the one with the most Airbnb listings.
+```{r, results="hide"}
+
+
+airbnb_final <- na.omit(airbnb_final, "zona")
+
+##raggruppamento per zone
+
+result_zone <- airbnb_final %>%
+  group_by(zona) %>%
+  summarise(
+    average_price = mean(log_price, na.rm = TRUE),
+    count = n()
+  ) %>%
+  arrange(desc(average_price))
+
+# Mostra le prime zone con la media del prezzo più alta
+top_zones <- head(result_zone, 9)
+print(top_zones)
+```
+
+```{r, crop=TRUE}
+ggplot(top_zones, aes(x = reorder(zona, -average_price), y = average_price, fill = count)) +
+  geom_bar(stat = "identity") +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(x = "Zona", y = "Average Log Price", fill = "Number of house") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle("Top areas with the highest average price for homes")
+```
+
+
+```{r}
+# ROOM TYPE
+# boxplot
+type_boxplot <- ggplot(data = airbnb_final, aes(x = "", y = log_price, fill=room_type))+ 
+  geom_boxplot() + 
+  theme_bw() +
+  labs(title="Log Price vs. Room Type", y="Log Price ($)") +
+  theme(axis.title.x = element_blank()) 
+  #guides(fill=guide_legend(nrow=2,byrow=TRUE))
+
+# room type density plot
+type_density <- airbnb_final %>% ggplot(aes(x=log_price, colour=room_type)) +
+  geom_density() +
+  theme_bw() +
+  labs(title="Log Price Densities by Room Type") 
+```
+
+```{r}
+# BED/BATH/ACCOMODATES
+airbnb_final <- rename(airbnb_final, bathrooms = bathrooms_text)
+
+bed_bath_dat <- airbnb_final %>% select(log_price, bathrooms, accommodates, bedrooms) %>%
+  pivot_longer(-log_price, names_to="Category", values_to="Quantity")
+
+bed_bath_plot <- ggplot(bed_bath_dat,aes(x=Quantity, y=log_price, colour=Category)) +
+  geom_point() +
+  facet_wrap(~Category, scales="free") +
+  geom_smooth(formula = y ~ x, method = "lm", color="black") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  scale_color_brewer(palette="Accent") +
+  labs(title="Listing Characteristics vs. Log Price", y="Log Price ($)")
+```
+
+
+After reviewing the remaining covariates, it was found that the log price varies considerably for each given room type as displayed in the top plot below. With this in mind, we will proceed to use this variable to structure our hierarchical model. In the bottom plot, we see that variables related to the size of the listing (accomodates, bathrooms, bedrooms) all have a positive relationship with log price. This is no surprise, as intuitively, the larger the Airbnb is, the more expensive it will be.
+
+```{r}
+require(gridExtra)
+grid.arrange(type_density,bed_bath_plot, ncol=1, nrow=2)
+```
+
+
+Further investigation into the data found that Porta Venezia,Buenos Aires and Duomo has the most listings in the data. Looking at the proportions of the different room type it was found that most listings are for entire homes/apartments, with the next most frequent being a private room. Shared rooms and hotels are much less common. 
+
+Overall, in the EDA it was found that variables related to the listing, the neighborhood, and room type were most influential on the price. Variables relating to the host and review scores did not have as strong of a relationship. Of the review variables, the overall rating, accuracy, cleanliness, and location would be of interest. 
+
+\newpage
+
+# Methods 
+
+For the analysis we will use two different models.
+For first, we will hierarchically model log price with fixed effects, using a room type hierarchical structure (within neighborhoods). This allows us varying intercepts for the covariates, but a constant slope. This hierarchical structure has been motivated by the EDA where it was found that price varied vastly across different room types.
+
+Thus, the model specification is as follows:
+
+$$
+\begin{aligned}
+y_i|\alpha_{j[i]} &\sim N(\alpha_{j[i]} + \beta^T x_i,\sigma_y^2) \; \text{for} \; i=1,2,...,n \\
+\alpha_j &\sim N(\mu_\alpha,\sigma^2_\alpha), \; \text{for} \; j=1,\dots,J \\
+\mu_\alpha &\sim N(0,1) \\
+\sigma^2_\alpha &\sim N^+(0,1) \\
+\sigma^2_y &\sim N^+(0,1) \\
+\beta_k &\sim N(0,1)
+\end{aligned}
+$$
+Where 
+
+- $i$ is the observation number
+- $n$ is the total number of observations
+- $j$ is the room type number
+- $J$ is the total number of room types
+- $k$ is the number of covariates
+- $x_i$ is the vector of covariate data for observation $i$
+- $\alpha_j$ is the room_type level mean log price
+- $\beta$ is a vector of $k$ coefficients corresponding to each of the covariates
+
+As a baseline, a linear (non-hierarchical) model will also be fit in order to compare the models. The simpler model will be specified as follows:
+
+$$
+\begin{aligned}
+y_i &\sim N(\alpha + \beta^T x_i,\sigma_y^2) \; \text{for} \; i=1,2,...,n \\
+\alpha &\sim N(0,1),  \ \\
+\sigma^2_y &\sim N^+(0,1) \\
+\beta_k &\sim N(0,1)
+\end{aligned}
+$$
+To validate our model, we will check model diagnostic plots such as traceplots and pairs plots to ensure the chains have mixed properly and that we have sampled the entire space. Checking convergence diagnostics such as the effective sample sizes (n_eff) and Rhat values evaluate how well the sampler is doing at sampling the posterior distribution of the given model. This will help us understand if this statistical model is appropriate for the data or better than other models.
+
+\newpage
+
+# Results
+
+In this section, we will discuss the results of the following models:
+
+- Model 1: Hierarchical Model with all Covariates (including Neighbourhoods)
+- Model 2: Hierarchical Model with all Covariates (including Areas)
+- Model 3: Hierarchical Model with Selected Covariates
+- Model 4: Linear Model with all Covariates (including Areas)
+
+
+## Model 1 - Neighbourhoods and all Covariates
+
+To begin our analysis, we fit a hierarchical fixed effects model modeling log price, using all of the available covariates, including neighbourhoods, but not areas. Before fitting the model, numeric variables were mean-centered, and categorical variables were encoded as dummy variables. After running this first model, a warning was received that indicated that the Bulk Effective Samples Size (ESS) was too low, which indicated posterior means and medians may be unreliable. This is due to the fact that many neighborhoods in the dataset contained only a few houses, with many having less than 10. Therefore, we prefer to change our perspective to continue the analysis. Checking the summary, the Rhat values seemed to be $\approx 1$, with 1.02 as the highest. Because of this warning, we then considered grouping the neighbourhoods into the Milan's areas, and perhaps limiting the covariates to those which appeared to be of interest in the exploratory data analysis. 
+
+```{r, include=FALSE}
+
+# lets get the data into the correct format for stan
+
+# make room type a factor
+print(levels(as.factor(airbnb_final$room_type)))
+airbnb_data <- airbnb_final %>% 
+  select(-host_id, -price) %>%
+  mutate(room_type = as.numeric(as.factor(room_type)))  
+airbnb_data$zona <- as.factor(airbnb_data$zona)
+
+
+# mean center numeric variables
+airbnb_data2 <-
+  airbnb_data %>% mutate(
+    host_listings_count = scale(host_listings_count, center=TRUE, scale=FALSE),
+    bathrooms = scale(bathrooms, center=TRUE, scale=FALSE),
+    accommodates = scale(accommodates, center=TRUE, scale=FALSE),
+    bedrooms = scale(bedrooms, center=TRUE, scale=FALSE),
+    number_of_reviews = scale(number_of_reviews, center=TRUE, scale=FALSE),
+    review_scores_rating = scale(review_scores_rating, center=TRUE, scale=FALSE),
+    review_scores_accuracy = scale(review_scores_accuracy, center=TRUE, scale=FALSE),
+    review_scores_cleanliness = scale(review_scores_cleanliness, center=TRUE, scale=FALSE),
+    review_scores_checkin = scale(review_scores_checkin, center=TRUE, scale=FALSE),
+    review_scores_communication = scale(review_scores_communication, center=TRUE, scale=FALSE),
+    review_scores_location = scale(review_scores_location, center=TRUE, scale=FALSE),
+    review_scores_value = scale(review_scores_value, center=TRUE, scale=FALSE)
+  ) 
+set.seed(8)
+
+#Model 1
+# create dummy vars for categorical vars
+no_district <- airbnb_data2 %>% select(-zona)
+mod1_data <- as.data.frame(model.matrix( ~ ., data = no_district))
+
+# select sample
+sample <- mod1_data %>% sample_n(2000)
+xmatrix <- as.matrix(sample %>% select(-log_price, -room_type, -`(Intercept)`))
+
+# # put into stan data
+# stan_data <- list(N = nrow(xmatrix),
+#                   J = max(mod1_data$room_type),
+#                   K = ncol(xmatrix),
+#                   room_type = sample$room_type,
+#                   X = xmatrix,
+#                   y = sample$log_price)
+# 
+# model1 <- stan(data = stan_data,
+#                file = here("/Users/pilota/Desktop/lore/code/airbnb_model.stan"),
+#                 iter = 2000,
+#                 seed = 8)
+# 
+# # save model with everything
+# saveRDS(model1, "fit1.rds")
+# 
+# # load in the model
+# model1 <- readRDS("fit1.rds")
+# max(summary(model1)$summary[,c("Rhat")])
+# 
+# # summary(model1)$summary[c(paste0("alpha[", 1:4, "]"), paste0("beta[", 1:6, "]"),
+# #                           paste0("beta[", 146:157, "]"), "mu", "sigma_a", "sigma_y"),
+# #                         c("mean", "se_mean", "n_eff", "Rhat")]
+# 
+# # traceplots - alphas
+# pars = c(paste0("alpha[", 1:4, "]"))
+# traceplot(model1, pars=pars)
+# 
+# stan_dens(model1, separate_chains=TRUE, pars=pars)
+# pairs(model1, pars=pars)
+# 
+# pars = c("mu", "sigma_a", "sigma_y")
+# #pars = c(paste0("beta[", 1:6, "]"),paste0("beta[", 146:157, "]"))
+# traceplot(model1, pars=pars)
+# pairs(model1, pars=pars)
+```
+
+## Model 2 - Areas and all Covariates
+
+For the second model, neighbourhoods were grouped into one of the 9 areas in Milan. After performing this grouping, the second model was fit with areas instead of neighbourhoods, again hierarchically modeling log price with fixed effects using a room type structure. In this model, all covariates have been included, similar to Model 1. Looking at the Rhat values for this model, the largest Rhat was 1.004751, with the rest of them $\approx 1$, indicating good mixing of the chains. Next, we can look at the traceplot and pairs plots for the alphas. 
+
+```{r, include=FALSE}
+#riordino la variabile zona
+airbnb_data2$zona <- factor(airbnb_data2$zona, levels = c("9","1","2","3","4","5","6","7","8"))
+# create the data
+district <- airbnb_data2 %>% select(-neighbourhood)
+mod2_data <- as.data.frame(model.matrix( ~ ., data = district))
+
+
+
+# select sample
+sample2 <- mod2_data %>% sample_n(2000)
+xmatrix2 <- as.matrix(sample2 %>% select(-log_price, -room_type, -`(Intercept)`))
+
+stan_data2 <- list(N = nrow(xmatrix2),
+                   J = max(mod2_data$room_type),
+                   K = ncol(xmatrix2),
+                   room_type = sample2$room_type,
+                   X = xmatrix2,
+                   y = sample2$log_price)
+model2 <- stan(data = stan_data2,
+               file = here("/Users/pilota/Desktop/lore/code/airbnb_model.stan"),
+               iter = 2000,
+               seed = 8)
+
+# save model with everything
+saveRDS(model2, "fit2.rds")
+
+# load in the model
+model2 <- readRDS("fit2.rds")
+
+# look at max rhat val
+max(summary(model2)$summary[,c("Rhat")])
+
+```
+
+```{r}
+# traceplots - alphas
+pars = c(paste0("alpha[", 1:4, "]"))
+traceplot(model2, pars=pars)
+```
+
+
+```{r}
+# pairs plot - alphas
+#stan_dens(model2, separate_chains=TRUE, pars=pars)
+pairs(model2, pars=pars)
+```
+
+The traceplot indicated that the chains mixed well. Looking at the pairs plot, this type of pattern could suggest that our variables are not significantly influencing each other within the model, as they seem to be largely independent. After checking all of convergence diagnostics, we can try and assess model fit. All the rhat indices are close to 1.
+
+\newpage
+
+Next, we can look at the overall distributions of the replicated datasets versus the data. The following figure contains a plot of the distribution of our data (y) against 100 different datasets drawn from the posterior predictive distribution on the top. We see that the observed and the predicted log prices seem to follow the same normal distribution which is good.
+
+We can also look at some test statistics that are of interest. In the bottom panel, we see the distribution of the median (log) prices across the replicated data sets in comparison to the median in the data. We see that for entire homes/apartments, the predicted median log price is too high. It is slightly less high for private rooms, and looks to be about average for the hotel rooms and shared rooms.
+
+```{r}
+set.seed(1856)
+y <- sample2$log_price
+yrep2 <- rstan::extract(model2)[["log_price_rep"]]
+samp100 <- sample(nrow(yrep2), 100)
+ppc_dens <- ppc_dens_overlay(y, yrep2[samp100, ])  + ggtitle("Distribution of Observed vs. Predicted Log Prices")
+sample2 <- sample2 %>% mutate(room_names = case_when(room_type == 1 ~ "Entire Home/Apartment", 
+                                                     room_type == 2 ~ "Hotel Room",
+                                                     room_type == 3 ~ "Private Room",
+                                                     room_type == 4 ~ "Shared Room"))
+# test stats - median
+ppc_stat <- ppc_stat_grouped(sample2$log_price, yrep2, group = sample2$room_names, stat = 'median') + ggtitle("Median by Room Type - Model 2")
+
+grid.arrange(ppc_dens,ppc_stat, ncol=1, nrow=2)
+```
+
+Finally, we can take a look at the mean room type alphas along with their 95% credible intervals as seen below.
+
+We see that, entire homes/apartments have the largest intercept, followed by hotel rooms. We see that shared rooms and hotels have a much wider credible interval, indicating more uncertainty in those lower prices.
+
+
+```{r}
+# extract results from summary
+mod2_summary <- as.data.frame(summary(model2,probs = c(0.025, 0.975))$summary)
+colnames(mod2_summary) <- c("mean", "se_mean", "sd", "ci_lower", "ci_upper", "n_eff", "rhat")
+
+mod2_summary$row_name <- rownames(mod2_summary)
+
+# keep alphas
+mod2_plot <- mod2_summary %>%
+  filter(str_detect(row_name, 'alpha')) 
+
+# add room_type name
+mod2_plot <- mod2_plot %>% mutate(room_type = c("Entire Home/Apartment", "Hotel Room", "Private Room", "Shared Room"))
+
+# plot results
+ggplot(data = mod2_plot, aes(x = mean, y = room_type)) + 
+  geom_point() +
+  geom_line() + 
+  geom_linerange(aes(xmin = ci_lower, xmax = ci_upper), size=0.25) + 
+  theme_minimal() +
+  labs(x = "Alpha", y = "Room Type", 
+       title = "Room Type Alphas (Intercepts)", subtitle="With 95% CIs")
+```
+
+Looking at the beta coefficients, we see that the covariate with the largest coefficient is the dummy Zona 1, following to the number of bathrooms.
+Regarding the areas, we see that mainly all areas have the 0 in the 95% CI, except for zona2, and zona1, that seems like a very influent variable.
+Out of all of the covariates, the ones that do not contain include zero in their 95% CI are the following: review scores for value, overall rating, location, and cleanliness, zona 1 and 2 , and size variables like accommodates and number of beds/bathrooms. 
+
+```{r}
+cols2 <- colnames(sample2 %>% select(-log_price, -room_type, -`(Intercept)`,-room_names))
+
+# keep betas
+mod2_plot_beta <- mod2_summary %>%
+  filter(str_detect(row_name, 'beta')) 
+
+# add room_type name
+mod2_plot_beta <- mod2_plot_beta %>% mutate(variable=cols2)
+
+# plot results
+ggplot(data = mod2_plot_beta, aes(x = mean, y = variable)) + 
+  geom_point() +
+  geom_line() + 
+  geom_linerange(aes(xmin = ci_lower, xmax = ci_upper), size=0.25) + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30)) + 
+  labs(y = "Variable", x = "Beta", 
+       title = "Beta Coefficients", subtitle="With 95% CIs")
+```
+
+
+\newpage
+
+## Model 3 - Districts with Selected Covariates
+
+Another model to examine is similar to Model 2, but with fewer covariates. In this model, we will try to reduce the covariates to contain only those that have been identified in our exploratory analysis as important, namely, bedrooms, bathrooms, accommodates, and some review information (rating, cleanliness, location, value). Moreover, in regards to the areas, in this analysis we will only examine zona1, which was not previously included, and we will exclude all the other districts. After running the model, the Rhat values appeared to be good (maximum value of 1.002776), and the chains seemed to have mixed well in the traceplot. The pair plot appears very similar to that of the previous model, as well as the PPC graphs, with the predicted median logarithmic price too high for entire houses/apartments.
+
+```{r, include=FALSE}
+
+set.seed(8)
+
+# keep only selected vars from EDA
+mod3 <- airbnb_data2 %>% select(bedrooms, bathrooms, room_type, log_price, accommodates, review_scores_rating, review_scores_value, review_scores_location, review_scores_cleanliness,zona)
+# create dummy vars for categorical vars
+#mod3_data <- dummy_cols(mod3, select_columns = "zona", remove_first_dummy = FALSE, remove_selected_columns = TRUE)
+# Crea la nuova colonna 'zona1'
+mod3$zona1 <- ifelse(mod3$zona == "1", 1, 0)
+
+# Elimina la colonna 'zona'
+mod3$zona <- NULL
+
+# Rimuovere le colonne delle variabili di zona esistenti
+#mod3_data <- mod3_data %>%
+  #select(-c(zona_2, zona_3, zona_4, zona_5, zona_6, zona_7, zona_8, zona_9))
+mod3_data <- as.data.frame(model.matrix( ~ ., data = mod3))
+
+
+
+
+# select sample
+sample3 <- mod3_data %>% sample_n(2000)
+cols <- colnames(sample3 %>% select(-log_price, -room_type, -`(Intercept)`))
+xmatrix3 <- as.matrix(sample3 %>% select(-log_price, -room_type, -`(Intercept)`))
+stan_data3 <- list(N = nrow(xmatrix3),
+                   J = max(mod3_data$room_type),
+                   K = ncol(xmatrix3),
+                   room_type = sample3$room_type,
+                   X = xmatrix3,
+                   y = sample3$log_price)
+
+model3 <- stan(data = stan_data3, 
+               file = here("/Users/pilota/Desktop/lore/code/airbnb_model.stan"),
+               iter = 2000,
+               seed = 8)
+
+```
+
+
+
+```{r, eval=FALSE}
+# save model with everything
+saveRDS(model3, "fit3.rds")
+```
+
+
+```{r, include=FALSE}
+# load in the model
+#model3 <- readRDS("fit3.rds")
+#max(summary(model3)$summary[,c("Rhat")])
+```
+
+```{r, include=FALSE}
+#summary(model3)$summary[c(paste0("alpha[", 1:4, "]"), paste0("beta[", 1:2, #"]"),
+                         # paste0("beta[", 8:12, "]"), "mu", "sigma_a", #"sigma_y"),
+                     #   c("mean", "se_mean", "n_eff", "Rhat")]
+```
+
+```{r, include=FALSE}
+# traceplots - alphas
+# pars = c(paste0("alpha[", 1:4, "]"))
+# traceplot(model3, pars=pars)
+# 
+# stan_dens(model3, separate_chains=TRUE, pars=pars)
+# pairs(model3, pars=pars)
+```
+
+```{r, include=FALSE}
+# set.seed(1856)
+# y3 <- sample3$log_price
+# yrep3 <- rstan::extract(model3)[["log_price_rep"]]
+# samp100_3 <- sample(nrow(yrep3), 100)
+# 
+# ppc_dens_3 <- ppc_dens_overlay(y3, yrep3[samp100_3, ])  + ggtitle("Distribution of Observed vs. Predicted Log Prices")
+# sample3 <- sample3 %>% mutate(room_names = case_when(room_type == 1 ~ "Entire Home/Apartment", 
+#                                                      room_type == 2 ~ "Hotel Room",
+#                                                      room_type == 3 ~ "Private Room",
+#                                                      room_type == 4 ~ "Shared Room"))
+# # test stats - median
+# ppc_stat_3 <- ppc_stat_grouped(sample3$log_price, yrep3, group = sample3$room_names, stat = 'median') + ggtitle("Median by Room Type - Model 3")
+# 
+# grid.arrange(ppc_dens_3,ppc_stat_3, ncol=1, nrow=2)
+```
+
+
+
+Now let's analyze the beta coefficients with their respective 95% credible intervals for this new model. The highest covariate turns out to be that of zone 1, which further confirms the influence of location, even more so the proximity to the center. Some covariates on the reviews have instead lost importance, while those concerning features such as number of bathrooms, bedrooms, and beds remain more or less unchanged, and are also characterized by a very low level of uncertainty.
+
+
+```{r}
+# extract results from summary
+mod3_summary <- as.data.frame(summary(model3,probs = c(0.025, 0.975))$summary)
+colnames(mod3_summary) <- c("mean", "se_mean", "sd", "ci_lower", "ci_upper", "n_eff", "rhat")
+
+mod3_summary$row_name <- rownames(mod3_summary)
+
+# keep betas
+mod3_plot <- mod3_summary %>%
+  filter(str_detect(row_name, 'beta')) 
+
+# add room_type name
+mod3_plot <- mod3_plot %>% mutate(variable = cols)
+
+# plot results
+ggplot(data = mod3_plot, aes(x = mean, y = variable)) + 
+  geom_point() +
+  geom_line() + 
+  geom_linerange(aes(xmin = ci_lower, xmax = ci_upper), size=0.25) + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30)) + 
+  labs(y = "Variable", x = "Beta", 
+       title = "Beta Coefficients", subtitle="With 95% CIs")
+```
+
+## Model 4 - Baseline Model (Linear Fit, all Covariates)
+
+Finally, as a baseline model, we fit a simple linear model in STAN using all the covariates to try and model log price. Checking the model diagnostics, the chains appeared to have mixed well and all Rhat values were $\approx 1$. We can now proceed to compare the models. 
+
+```{r, include=FALSE}
+model4 <- stan(data = stan_data2,
+               file = here("/Users/pilota/Desktop/lore/code/airbnb_linear.stan"),
+               iter = 2000,
+               seed = 8)
+```
+
+```{r, eval=FALSE}
+# save model with everything
+saveRDS(model4, "fit4.rds")
+```
+
+```{r}
+# load in the model
+#model4 <- readRDS("fit4.rds")
+#max(summary(model4)$summary[,c("Rhat")])
+```
+
+```{r, include=FALSE}
+#traceplot(model4, pars="beta")
+```
+
+```{r, include=FALSE}
+#summary(model4)$summary
+```
+
+## Compare Models
+
+In order to compare the models, we will be examining the LOO ELPD(Logarithmic Out-of-sample Predictive Density). When comparing two fitted models, we can estimate the difference in their expected predictive accuracy by the difference in LOO ELPD. The first step of this is to get the point-wise log likelihood estimates from each model and then get estimates for the ELPD(Expected Logarithmic Predictive Density). For this analysis, we will not include Model 1 in the comparisons. 
+
+```{r warning=FALSE}
+#loglik1 <- as.matrix(model1, pars="log_lik")
+loglik2 <- as.matrix(model2, pars="log_lik")
+loglik3 <- as.matrix(model3, pars="log_lik")
+loglik4 <- as.matrix(model4, pars="log_lik")
+```
+
+```{r warning=FALSE}
+#loo1 <- loo(loglik1, save_psis=TRUE)
+loo2 <- loo(loglik2, save_psis=TRUE)
+loo3 <- loo(loglik3, save_psis=TRUE)
+loo4 <- loo(loglik3, save_psis=TRUE)
+```
+### Model 2 vs. Model 3
+```{r}
+kable(loo_compare(loo2,loo3))
+```
+Here we see that Model 2 had the higher ELPD, and thus is a better model fit.
+
+### Model 2 vs. Model 4
+```{r}
+kable(loo_compare(loo2,loo4))
+```
+When looking at Model 2 versus Model 4, Model 2 had the higher ELPD, and thus is the better model. 
+
+### Model 3 vs. Model 4
+
+```{r}
+kable(loo_compare(loo3,loo4))
+```
+Interestingly, between Model 3 and Model 4, there is no difference. Therefore, we are indifferent between the two models. 
+
+# Discussion
+
+Intuitively, we expected to see that the neighborhood where the Airbnb is located, the type of room, and the variables related to the listing itself would have the greatest influence on the price. For example, an entire house in the city center with more than 3 beds will be more expensive than a shared room located further from the center. The results from the various models examined in this analysis align well with this hypothesis.
+
+Firstly, we fitted a hierarchical fixed effects model modeling the logarithmic price, using all available covariates, including neighborhoods. Including neighborhoods in the model resulted in a model that had a low effective sample size. To address this, neighborhoods were grouped into zones and the model was rerun (Model 2). The second model showed good diagnostic indicators, and the significant coefficients were bedrooms, bathrooms, accommodates, and some review information (rating, cleanliness, location, value), and the zone considered. Motivated by the EDA, a third model was fitted using a smaller subset of variables. This model also showed good diagnostic indicators, and the significant coefficients were the usual main characteristics related to the accommodation, such as bedrooms and bathrooms, and the membership to zone1. For both models, the intercept for the entire house/apartment was the highest, with the shared room being the lowest. Finally, a fourth model was fitted using a simple linear fit for comparison purposes.
+In the end comparing the models, we find that we can get the most accuracy from the model
